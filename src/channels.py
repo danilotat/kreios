@@ -1,6 +1,10 @@
 import torch
 import math
 from abc import ABC, abstractmethod
+from region import Region, VCFRegion
+from model import SimpleGenomicCNN
+from genome import retrieve_sequence
+import logging
 import fetch
 import numpy as np
 import pysam
@@ -16,12 +20,17 @@ class ChannelEncoder(ABC):
         self.fill_value = fill_value
 
     def create_empty_tensor(self, shape: tuple, device: str) -> torch.Tensor:
-        """Creates a tensor full of the specified padding/fill value."""
+        """
+        Instantiate the empty tensor
+        """
         return torch.full(shape, fill_value=self.fill_value, dtype=self.dtype, device=device)
 
     @abstractmethod
     def _get_read_data(self, masked_read: fetch.MaskedRead) -> np.ndarray:
-        """Abstract method to get the specific data array from a MaskedRead."""
+        """
+        Abstract method to get the specific data array from a MaskedRead.
+        This is replaced within each subclass according to the channel's logic
+        """
         pass
 
     def __call__(self, reads_to_process: list[fetch.MaskedRead], start_row: int, tensor_shape: tuple, region_start: int, device: str, **kwargs) -> torch.Tensor:
@@ -58,7 +67,7 @@ class ChannelEncoder(ABC):
 
 
 class SequenceEncoder(ChannelEncoder):
-    def __init__(self, base_color_stride=6, offset_t_c=5, offset_a_g=4, default_color=0):
+    def __init__(self, base_color_stride=20, offset_t_c=5, offset_a_g=4, default_color=0):
         # Define the color mapping for each base. This concept is inspired by the read base channel in DeepVariant.
         self.BASE_COLOR_MAP = {
             'A': offset_a_g + base_color_stride * 3,
@@ -134,45 +143,192 @@ class IntronicEncoder(ChannelEncoder):
                 intron_array[i] = self.non_intron_value
         return intron_array
 
-
 class ReferenceMatchingEncoder(ChannelEncoder):
     """Encodes whether the read base matches the reference base."""
-    def __init__(self, reference_sequence: str, padding_value=-1):
+    def __init__(self, padding_value=-1):
         super().__init__(
             name='ref_match', 
             dtype=torch.int8, 
             fill_value=padding_value
         )
         self.reference_matching = 11
-        self.reference_mismatching = 12
-        self.reference_sequence = reference_sequence.upper()
+        self.reference_mismatching = 16
+        
+        # These will be set by the __call__ method for each region
+        self.reference_sequence = None
+        self.region_start = None
+
+    def __call__(self, reads_to_process: list, start_row: int, tensor_shape: tuple, region_start: int, device: str, **kwargs) -> torch.Tensor:
+        """
+        Overrides the parent __call__ to capture the 'reference_sequence' 
+        and 'region_start' context before processing.
+        """
+        ref_seq = kwargs.pop('reference_sequence', None)
+        if ref_seq is None:
+            raise ValueError("ReferenceMatchingEncoder requires 'reference_sequence' to be passed via kwargs.")
+        
+        # Set the context for this specific call
+        self.reference_sequence = ref_seq.upper()
+        self.region_start = region_start
+        
+        # Now, call the parent's __call__ method to execute the main loop
+        return super().__call__(
+            reads_to_process, 
+            start_row, 
+            tensor_shape, 
+            region_start, 
+            device, 
+            **kwargs
+        )
 
     def _get_read_data(self, masked_read: fetch.MaskedRead) -> np.ndarray:
+        """
+        Gets the match/mismatch data using the context set by __call__.
+        This version correctly maps global read coordinates to the local
+        reference sequence coordinates.
+        """
+        if self.reference_sequence is None or self.region_start is None:
+            raise RuntimeError("The reference sequence context has not been set. Ensure this encoder is called correctly.")
+
         read_sequence = masked_read.get_padded_array('sequence').astype(str)
-        ref_length = len(self.reference_sequence)
-        read_length = len(read_sequence)
-        # instantiate the match array with the fill value
-        match_array = np.full(read_length, fill_value=self.fill_value, dtype=np.int8)
-        # Determine the overlap between the read and the reference
-        overlap_start = max(0, masked_read.start)
-        overlap_end = min(ref_length, masked_read.end)
-        if overlap_start < overlap_end:
-            ref_segment = self.reference_sequence[overlap_start:overlap_end]
-            read_segment = read_sequence[overlap_start - masked_read.start : overlap_end - masked_read.start]
-            for i in range(len(read_segment)):
-                if read_segment[i] == '-':
-                    continue  # Skip padding
-                elif read_segment[i] == ref_segment[i]:
-                    match_array[overlap_start - masked_read.start + i] = self.reference_matching
+        read_len = len(read_sequence)
+        ref_len = len(self.reference_sequence)
+        
+        match_array = np.full(read_len, fill_value=self.fill_value, dtype=np.int8)
+
+        # Iterate through each base of the read
+        for i in range(read_len):
+            read_char = read_sequence[i]
+            if read_char == '-':
+                continue  # Skip padding characters in the read
+
+            # 1. Calculate the base's global genomic position
+            genomic_pos = masked_read.start + i
+            
+            # 2. Convert the global position to an index in our reference_sequence
+            ref_idx = genomic_pos - self.region_start
+            
+            # 3. Check if this position is valid within our fetched reference
+            if 0 <= ref_idx < ref_len:
+                ref_char = self.reference_sequence[ref_idx]
+                
+                if read_char == ref_char:
+                    match_array[i] = self.reference_matching
                 else:
-                    match_array[overlap_start - masked_read.start + i] = self.reference_mismatching
+                    match_array[i] = self.reference_mismatching
+                    
         return match_array
+
+
+class ReadStrandEncoder(ChannelEncoder):
+    """
+    Encodes reads based on whether they map to a strand or another.
+    """
+    def __init__(self, padding_value=-1):
+        super().__init__(
+            name='read_strand',  # A more descriptive name
+            dtype=torch.int8, 
+            fill_value=padding_value
+        )
+        self.positive_strand_color = 12
+        self.negative_strand_color = 15
+
+    def _get_read_data(self, masked_read: fetch.MaskedRead) -> np.ndarray:
+        # This base-level method is not used by this encoder's logic.
+        # The logic is handled entirely within the overridden __call__.
+        raise NotImplementedError("ReadStrandEncoder does not use _get_read_data.")
+
+    def __call__(self, reads_to_process: list[fetch.MaskedRead], start_row: int, tensor_shape: tuple, region_start: int, device: str, **kwargs) -> torch.Tensor:
+        """
+        Processes a list of reads to generate a tensor showing read strand.
+        """
+        final_tensor = self.create_empty_tensor(tensor_shape, device)
+        region_length = tensor_shape[1]
+        for i, m_read in enumerate(reads_to_process):
+            color = self.positive_strand_color
+            if m_read.read.is_reverse:
+                color = self.negative_strand_color
+            # computing of read placement 
+            tensor_start = max(0, m_read.start - region_start)
+            tensor_end = min(region_length, m_read.end - region_start)
+            if tensor_start >= tensor_end: 
+                continue
+            dest_row = start_row + i
+            # Fill the segment of the tensor corresponding to the read
+            final_tensor[dest_row, tensor_start:tensor_end] = color
+        return final_tensor
+
+
+class ReadsSupportingAlleleEncoder(ChannelEncoder):
+    """
+    Encodes reads based on whether they support a given alternate allele.
+    
+    Each read is assigned one of two values:
+    - `allele_supporting_read`: If the read's sequence contains the alternate allele
+      at the specified variant position.
+    - `allele_unsupporting_read`: Otherwise.
+      
+    This value is tiled across the entire span of the read in the final tensor.
+    """
+    def __init__(self, padding_value=-1):
+        super().__init__(
+            name='allele_support',  # A more descriptive name
+            dtype=torch.int8, 
+            fill_value=padding_value
+        )
+        self.allele_supporting_read = 2
+        self.allele_unsupporting_read = 10
+
+    def _get_read_data(self, masked_read: fetch.MaskedRead) -> np.ndarray:
+        # This base-level method is not used by this encoder's logic.
+        # The logic is handled entirely within the overridden __call__.
+        raise NotImplementedError("ReadsSupportingAlleleEncoder does not use _get_read_data.")
+
+    def __call__(self, reads_to_process: list[fetch.MaskedRead], start_row: int, tensor_shape: tuple, region_start: int, device: str, **kwargs) -> torch.Tensor:
+        final_tensor = self.create_empty_tensor(tensor_shape, device)
+        region_length = tensor_shape[1]
+        variant = kwargs.get('variant')
+        if not isinstance(variant, VCFRegion):
+            raise ValueError(
+                "ReadsSupportingAlleleEncoder requires a 'variant' of type VCFRegion "
+                "to be passed as a keyword argument."
+            )
+            
+        variant_pos = variant.start
+        alt_allele = variant.alt
+        for i, m_read in enumerate(reads_to_process):
+            supports_alt = False            
+            try:
+                ref_positions = m_read.read.get_reference_positions(full_length=True)
+                query_index = ref_positions.index(variant_pos)
+                read_base = m_read.read.get_forward_sequence()[query_index].upper()
+                if read_base == alt_allele:
+                    supports_alt = True
+            except (ValueError, IndexError):
+                # This occurs if the read doesn't span the variant position.
+                # In this case, supports_alt correctly remains False.
+                pass
+
+            # 4. Determine the color and fill the tensor for this read
+            color = self.allele_supporting_read if supports_alt else self.allele_unsupporting_read
+            tensor_start = max(0, m_read.start - region_start)
+            tensor_end = min(region_length, m_read.end - region_start)
+            
+            if tensor_start >= tensor_end: 
+                continue
+                
+            dest_row = start_row + i
+            
+            # Fill the entire segment of the tensor corresponding to the read
+            final_tensor[dest_row, tensor_start:tensor_end] = color
+            
+        return final_tensor
+
 
 class AlleleFrequencyEncoder(ChannelEncoder):
     """
     Encodes a channel where the color of an entire read is determined by the
     allele frequency of the specific variant it supports.
-    #@TODO: still a WIP
     """
     K_MAX_PIXEL_VALUE_AS_FLOAT = 255.0
 
@@ -182,10 +338,8 @@ class AlleleFrequencyEncoder(ChannelEncoder):
         
         self.min_non_zero_af = min_non_zero_allele_frequency
         self.log10_min_af = math.log10(self.min_non_zero_af)
-        
         # The fill value for empty regions is the color for AF=0
         fill_color = self._allele_frequency_color(0.0)
-
         super().__init__(
             name='allele_frequency', 
             dtype=torch.uint8,
@@ -257,28 +411,34 @@ class AlleleFrequencyEncoder(ChannelEncoder):
 
 if __name__ == "__main__":
     from plotter import TensorVisualizer
+    region = 'chr5:140561643-140561644'
+    variant = VCFRegion(
+        region, ref='A', alt='T'
+    )
+    simplecnn = SimpleGenomicCNN()
+    # extend the region by 50 bp 
+    region = 'chr5:140561593-140561694'
+    region_object = Region(region)
+    genome = '/CTGlab/db/GRCh38_GIABv3_no_alt_analysis_set_maskedGRC_decoys_MAP2K3_KMT2C_KCNJ18.fasta'
+    reference_sequence = retrieve_sequence(genome, region_object)
+    print(f"Length of reference_sequence is {len(reference_sequence)}")
     all_encoders = [
         BaseQualityEncoder(),
         SequenceEncoder(),
         IntronicEncoder(),
+        ReferenceMatchingEncoder(),
+        ReadsSupportingAlleleEncoder(),
+        ReadStrandEncoder()
+
     ]
-    pos = 'chr5:140561643-140561644'
-    region = 'chr5:140561543-140561743'
     bam = "/CTGlab/projects/ribo/goyal_2023/RNAseq/SRR20649710_GSM6395082.markdup.sorted.bam"
-    fetcher = fetch.ReadFetcher(bam, max_reads=256, channel_encoders=all_encoders, device='cpu')
+    fetcher = fetch.ReadFetcher(bam, max_reads=256, channel_encoders=all_encoders, genome=genome, device='cpu')
 # 5. Call fetch_tensors and pass the variant-specific data.
     chromosome, positions = region.split(':')
     start, end = map(int, positions.split('-'))
-    tensors = fetcher.fetch_tensors(chromosome, start, end)
-    print(tensors.keys())
-    print(tensors['sequence_color'].shape, tensors['base_qualities'].shape, tensors['intronic'].shape)
+    tensors = fetcher.fetch_tensors(chromosome, start, end, variant)
+    single_tensor = torch.nan_to_num(
+        torch.stack(list(tensors.values()), dim=0))
+    print(simplecnn(single_tensor.unsqueeze(0)))
     fig = TensorVisualizer().plot(tensors, chromosome, start, end)
     fig.savefig("test_encoders.png")
-
-# Now final_tensors['allele_frequency'] will be a tensor where:
-# - Rows for reads 'read_name_1', 'read_name_3', 'read_name_8' are colored with the value for AF=0.25.
-# - Rows for other reads (like 'read_name_5') are colored with the value for AF=0.
-# - Empty rows are also colored with the value for AF=0.
-
-# print(final_tensors.keys())
-# Expected: dict_keys(['sequence_color', 'base_qualities', 'allele_frequency'])
