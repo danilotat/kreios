@@ -1,21 +1,19 @@
-import bionumpy as bnp
+import pysam
 from typing import List
-from .region import Region
+from region import Region
 import torch
 
 
-def retrieve_context(genome: bnp.Genome, intervals: List[Region], context: int = 20) -> List[str]:
+def retrieve_sequence(genome: str, interval: Region) -> str:
     """
-    This function retrieves the sequences for the given intervals from the genome, returning the sequences with added context on both sides.
-    NOTE: this could be used more effectively to play with pytorch.
+    This function retrieves the sequence for the given interval from the genome.
     """
-    intervals = [(interval.chromosome, max(0, interval.start - context), interval.end + context) for interval in intervals]
-    sequences = genome.read_sequence()[intervals]
-    sequences = bnp.as_encoded_array(sequences, bnp.DNAEncoding)
-    return sequences 
+    genome = pysam.FastaFile(genome)
+    print(interval)
+    sequence = genome.fetch(
+        interval.chromosome,
+        interval.start,
+        interval.end)
+    return sequence
 
-def to_multi_channel_tensor(sequences: List[str]) -> torch.Tensor:
-    """
-    Convert a list of DNA sequences to a multi-channel tensor representation.
-    """
     

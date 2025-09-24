@@ -1,11 +1,21 @@
 import pysam
 import numpy as np
 import torch
-import warnings
+import os
 import logging
 import sys
+from genome import retrieve_sequence 
+from region import Region, VCFRegion
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ])
 
 @dataclass
 class VariantCallData:
@@ -75,13 +85,14 @@ class ReadFetcher:
     Fetches reads from a BAM file and uses a set of ChannelEncoders to
     generate a dictionary of fixed-size, centered, multi-channel torch.Tensors.
     """
-    def __init__(self, bam_file: str, max_reads: int, channel_encoders: list, device='cpu'):
+    def __init__(self, bam_file: str, max_reads: int, channel_encoders: list, genome: str,  device='cpu'):
         """
         Args:
             bam_file (str): Path to the BAM file.
             max_reads (int): The fixed number of reads for the tensor's height.
             channel_encoders (list[ChannelEncoder]): A list of configured encoder
                 objects that will each produce one tensor.
+            genome (str): Path to the reference genome FASTA file.
             device (str): The device for tensor creation ('cpu' or 'cuda').
         """
         if max_reads <= 0:
@@ -90,20 +101,29 @@ class ReadFetcher:
         self.bam = pysam.AlignmentFile(bam_file, "rb")
         self.max_reads = max_reads
         self.channel_encoders = channel_encoders
+        self.genome = genome
+        if not os.path.exists(genome + ".fai"):
+            logging.info(f"Index file for genome {genome} not found. Creating index...")
+            pysam.faidx(genome)
         self.device = device
 
-    def fetch_tensors(self, chromosome: str, start: int, end: int) -> dict[str, torch.Tensor]:
+    def fetch_tensors(self, chromosome: str, start: int, end: int, variant: VCFRegion) -> dict[str, torch.Tensor]:
         """
         Fetches reads and returns a dictionary of fixed-size torch.Tensors,
         one for each configured ChannelEncoder. The read data is centered
         within the `max_reads` dimension.
         """
-        reads_iterator = self.bam.fetch(chromosome, start, end)
-        
+        region_obj = Region(f"{chromosome}:{start}-{end}")
+        ref_seq = retrieve_sequence(self.genome, region_obj)  
+        reads_iterator = self.bam.fetch(
+            chromosome, start, end)
         processed_reads = [
             MaskedRead(read, seq_padding_token='-', quality_padding_value=np.nan)
             for read in reads_iterator
-            if not read.is_unmapped and not read.is_secondary and not read.is_supplementary
+            if (not read.is_unmapped and 
+                not read.is_secondary and
+                not read.is_supplementary and
+                not read.is_duplicate)
         ]
 
         num_reads = len(processed_reads)
@@ -132,7 +152,9 @@ class ReadFetcher:
                 start_row=start_row,
                 tensor_shape=tensor_shape,
                 region_start=start,
-                device=self.device)
+                device=self.device,
+                reference_sequence=ref_seq,
+                variant=variant)
             
         return tensors
 
@@ -142,11 +164,12 @@ if __name__ == "__main__":
     pos = 'chr5:140561643-140561644'
     region = 'chr5:140561543-140561743'  # 20bp context on each side
     bam = "/CTGlab/projects/ribo/goyal_2023/RNAseq/SRR20649710_GSM6395082.markdup.sorted.bam"
+    genome = ""
     plotter = TensorVisualizer()
     fetcher = ReadFetcher(bam, max_reads=256)
     chromosome, positions = region.split(':')
     start, end = map(int, positions.split('-'))
-    reads = fetcher.fetch_tensors(chromosome, start, end)
+    reads = fetcher.fetch_tensors(chromosome, start, end, genome=genome)
     print(reads['sequence'].shape, reads['base_qualities'].shape, reads['alignment_qualities'].shape)
     print(reads['sequence'].shape == reads['base_qualities'].shape == reads['alignment_qualities'].shape)
     fig = plotter.plot(reads, chromosome, start, end)	
