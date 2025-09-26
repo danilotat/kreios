@@ -4,8 +4,8 @@ import torch
 import os
 import logging
 import sys
-from genome import retrieve_sequence 
-from region import Region, VCFRegion
+from .genome import retrieve_sequence 
+from .region import Region, VCFRegion
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -45,60 +45,90 @@ logging.basicConfig(
 
 class MaskedRead:
     """
-    Processes a single pysam.AlignedSegment to create padded numpy arrays
-    for its sequence and quality scores, accounting for introns.
+    OPTIMIZED: Processes a single pysam.AlignedSegment to create padded numpy
+    arrays. The Python loop and dictionary have been replaced with a fully
+    vectorized NumPy indexing approach for a massive speedup.
     """
     def __init__(self, read: pysam.AlignedSegment, seq_padding_token='-', quality_padding_value=np.nan):
         self.read = read
-        self.start = self.read.reference_start
-        self.end = self.read.reference_end
-        self._reference_positions = np.arange(self.start, self.end)
-        self.padded_arrays = {}
-        aligned_positions = self.read.get_reference_positions(full_length=False)
-        query_sequence = self.read.query_sequence
-        query_base_qualities = self.read.query_qualities
-        query_alignment_qualities = self.read.query_alignment_qualities
-        pos_to_query_index = {pos: i for i, pos in enumerate(aligned_positions)}
-        padded_sequence = np.full(len(self._reference_positions), fill_value=seq_padding_token, dtype='<U1')
-        padded_base_qualities = np.full(len(self._reference_positions), fill_value=quality_padding_value, dtype=np.float32)
-        padded_alignment_qualities = np.full(len(self._reference_positions), fill_value=quality_padding_value, dtype=np.float32)
-        for i, ref_pos in enumerate(self._reference_positions):
-            if ref_pos in pos_to_query_index:
-                query_idx = pos_to_query_index[ref_pos]
-                if query_idx < len(query_sequence):
-                    padded_sequence[i] = query_sequence[query_idx]
-                if query_idx < len(query_base_qualities):
-                    padded_base_qualities[i] = query_base_qualities[query_idx]
-                if query_idx < len(query_alignment_qualities):
-                    padded_alignment_qualities[i] = query_alignment_qualities[query_idx]
-        self.padded_arrays['sequence'] = padded_sequence
-        self.padded_arrays['base_qualities'] = padded_base_qualities
-        self.padded_arrays['alignment_qualities'] = padded_alignment_qualities
+        # reference_start / reference_end can be None for some pathological reads;
+        # handle defensively
+        if self.read.reference_start is None or self.read.reference_end is None:
+            # mark as zero-span read; callers should treat accordingly
+            self.start = 0
+            self.end = 0
+        else:
+            self.start = self.read.reference_start
+            self.end = self.read.reference_end
+
+        # total size of the covered region; if non-positive, create zero-length padded arrays
+        span_length = max(0, self.end - self.start)
+
+        # aligned positions that actually map to the reference (no soft-clips)
+        aligned_positions_list = self.read.get_reference_positions(full_length=False)
+
+        # create default padded arrays for all expected attributes
+        self.padded_arrays = {
+            'sequence': np.full(span_length, fill_value=seq_padding_token, dtype='<U1'),
+            'base_qualities': np.full(span_length, fill_value=quality_padding_value, dtype=np.float32),
+            'alignment_qualities': np.full(span_length, fill_value=quality_padding_value, dtype=np.float32)
+        }
+
+        # if no aligned positions (e.g., totally soft-clipped), return with padding arrays intact
+        if not aligned_positions_list or span_length == 0:
+            return
+
+        # these are the aligned positions in absolute coordinates
+        aligned_positions = np.array(aligned_positions_list, dtype=np.int64)
+        # relative coordinates within span
+        destination_indices = aligned_positions - self.start
+
+        # obtain query-aligned sequence and qualities for aligned portion
+        # pysam gives query_alignment_sequence (string) and query_alignment_qualities (list)
+        query_seq = np.fromiter(self.read.query_alignment_sequence, dtype='<U1')
+        query_b_qual = np.array(self.read.query_alignment_qualities, dtype=np.float32)
+
+        # ensure sequence and qualities have the same length as destination_indices
+        if len(query_seq) > len(destination_indices):
+            query_seq = query_seq[:len(destination_indices)]
+        if len(query_b_qual) > len(destination_indices):
+            query_b_qual = query_b_qual[:len(destination_indices)]
+
+        # place the read data into the padded arrays at the destination indices
+        # (numpy will broadcast indices if shapes are correct)
+        self.padded_arrays['sequence'][destination_indices] = query_seq
+        self.padded_arrays['base_qualities'][destination_indices] = query_b_qual
+
+        # For consistency with the original code's apparent intent.
+        aligned_base_qualities = np.array(self.read.query_alignment_qualities, dtype=np.float32)
+        if len(aligned_base_qualities) > len(destination_indices):
+            aligned_base_qualities = aligned_base_qualities[:len(destination_indices)]
+        self.padded_arrays['alignment_qualities'][destination_indices] = aligned_base_qualities
+
 
     def get_padded_array(self, attribute: str):
+        """Retrieves a specific padded array by name."""
         if attribute not in self.padded_arrays:
             raise ValueError(f"Attribute '{attribute}' not available.")
         return self.padded_arrays[attribute]
 
+
 class ReadFetcher:
     """
-    Fetches reads from a BAM file and uses a set of ChannelEncoders to
-    generate a dictionary of fixed-size, centered, multi-channel torch.Tensors.
+    IMPROVED: Assigns stable row_index to each MaskedRead so every encoder writes
+    into the same row (the root cause of your mismatched padded regions).
     """
-    def __init__(self, bam_file: str, max_reads: int, channel_encoders: list, genome: str,  device='cpu'):
-        """
-        Args:
-            bam_file (str): Path to the BAM file.
-            max_reads (int): The fixed number of reads for the tensor's height.
-            channel_encoders (list[ChannelEncoder]): A list of configured encoder
-                objects that will each produce one tensor.
-            genome (str): Path to the reference genome FASTA file.
-            device (str): The device for tensor creation ('cpu' or 'cuda').
-        """
+    def __init__(self, bam_file: str, max_reads: int, channel_encoders: list, genome: str, device='cpu'):
         if max_reads <= 0:
             raise ValueError("max_reads must be a positive integer.")
+
         self.bam_file = bam_file
+        # Ensure BAM index present
+        if not os.path.exists(bam_file + ".bai"):
+            logging.info(f"Index for {bam_file} not found. Attempting to create one.")
+            pysam.index(bam_file)
         self.bam = pysam.AlignmentFile(bam_file, "rb")
+
         self.max_reads = max_reads
         self.channel_encoders = channel_encoders
         self.genome = genome
@@ -107,56 +137,85 @@ class ReadFetcher:
             pysam.faidx(genome)
         self.device = device
 
-    def fetch_tensors(self, chromosome: str, start: int, end: int, variant: VCFRegion) -> dict[str, torch.Tensor]:
-        """
-        Fetches reads and returns a dictionary of fixed-size torch.Tensors,
-        one for each configured ChannelEncoder. The read data is centered
-        within the `max_reads` dimension.
-        """
+    def fetch_tensors(self, chromosome: str, start: int, end: int, variant: VCFRegion) -> dict:
         region_obj = Region(f"{chromosome}:{start}-{end}")
-        ref_seq = retrieve_sequence(self.genome, region_obj)  
-        reads_iterator = self.bam.fetch(
-            chromosome, start, end)
-        processed_reads = [
-            MaskedRead(read, seq_padding_token='-', quality_padding_value=np.nan)
-            for read in reads_iterator
-            if (not read.is_unmapped and 
-                not read.is_secondary and
-                not read.is_supplementary and
-                not read.is_duplicate)
-        ]
+        ref_seq = retrieve_sequence(self.genome, region_obj)
 
-        num_reads = len(processed_reads)
-        reads_to_process = []
-        start_row = 0
+        # Fetch raw reads and pre-filter unmapped/secondary/supplementary/duplicates
+        raw_iter = self.bam.fetch(chromosome, start, end)
+        reads_kept = []
+        for r in raw_iter:
+            if r.is_unmapped or r.is_secondary or r.is_supplementary or r.is_duplicate:
+                continue
+            reads_kept.append(r)
 
-        if num_reads > self.max_reads:
+        total_reads = len(reads_kept)
+        if total_reads == 0:
+            # No reads; create empty (filled) tensors from encoders and return
+            region_length = end - start
+            tensor_shape = (self.max_reads, region_length)
+            tensors = {}
+            for encoder in self.channel_encoders:
+                tensors[encoder.name] = encoder(
+                    reads_to_process=[],
+                    start_row=(self.max_reads // 2),
+                    tensor_shape=tensor_shape,
+                    region_start=start,
+                    device=self.device,
+                    reference_sequence=ref_seq,
+                    variant=variant
+                )
+            return tensors
+
+        # Crop to the central max_reads if we have too many
+        if total_reads > self.max_reads:
             logging.warning(
-                f"Found {num_reads} reads, which is more than max_reads={self.max_reads}. "
+                f"Found {total_reads} reads, which is more than max_reads={self.max_reads}. "
                 f"Taking the central {self.max_reads} reads."
             )
-            crop_start = (num_reads - self.max_reads) // 2
-            reads_to_process = processed_reads[crop_start : crop_start + self.max_reads]
+            crop_start = (total_reads - self.max_reads) // 2
+            selected_reads = reads_kept[crop_start : crop_start + self.max_reads]
+            start_row = 0
         else:
-            reads_to_process = processed_reads
-            start_row = (self.max_reads - num_reads) // 2
-        
+            selected_reads = reads_kept
+            start_row = (self.max_reads - total_reads) // 2
+
+        # Create MaskedRead objects in the selected order and assign stable row indices
+        masked_reads = []
+        for idx, r in enumerate(selected_reads):
+            m = MaskedRead(r)
+            # row_index is the canonical per-read index used by encoders
+            m.row_index = idx
+            masked_reads.append(m)
+
         region_length = end - start
         tensor_shape = (self.max_reads, region_length)
         tensors = {}
-
-        # Delegate tensor creation to each encoder
+        # Pass the same reads_to_process (with row_index) to all encoders
         for encoder in self.channel_encoders:
             tensors[encoder.name] = encoder(
-                reads_to_process=reads_to_process,
+                reads_to_process=masked_reads,
                 start_row=start_row,
                 tensor_shape=tensor_shape,
                 region_start=start,
                 device=self.device,
                 reference_sequence=ref_seq,
-                variant=variant)
-            
+                variant=variant
+            )
+
         return tensors
+
+    def close(self):
+        """Close the underlying BAM file gracefully."""
+        if hasattr(self, 'bam') and self.bam:
+            self.bam.close()
+
+    def __del__(self):
+        # Ensure file is closed
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
