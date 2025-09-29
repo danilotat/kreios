@@ -290,7 +290,7 @@ class ReadsSupportingAlleleEncoder(ChannelEncoder):
 
     def __call__(self, reads_to_process: list, start_row: int, tensor_shape: tuple, region_start: int, device: str, **kwargs) -> torch.Tensor:
         """
-        Overwrite of the 
+        Overwrite of the main __class__
         """
         final_tensor = self.create_empty_tensor(tensor_shape, device)
         region_length = tensor_shape[1]
@@ -298,19 +298,14 @@ class ReadsSupportingAlleleEncoder(ChannelEncoder):
         for i, m_read in enumerate(reads_to_process):
             row_idx = getattr(m_read, 'row_index', i)
             dest_row = start_row + row_idx
-
             if dest_row < 0 or dest_row >= tensor_shape[0]:
                 continue
-
             tensor_start = max(0, m_read.start - region_start)
             tensor_end = min(region_length, m_read.end - region_start)
             if tensor_start >= tensor_end:
                 continue
-
             read_slice_start = max(0, region_start - m_read.start)
             read_slice_end = read_slice_start + (tensor_end - tensor_start)
-            
-            # Pass kwargs down to the data generation method
             padded_array = self._get_read_data(m_read, **kwargs)
             data_to_place = padded_array[read_slice_start:read_slice_end]
 

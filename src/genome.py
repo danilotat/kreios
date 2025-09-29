@@ -1,10 +1,9 @@
 import pysam
 from typing import List
-from region import Region
 import torch
 
 
-def retrieve_sequence(genome: str, interval: Region) -> str:
+def retrieve_sequence(genome: str, interval) -> str:
     """
     This function retrieves the sequence for the given interval from the genome.
     """
