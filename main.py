@@ -14,6 +14,7 @@ import sys
 import csv
 import os
 import logging
+import argparse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,7 +25,7 @@ logging.basicConfig(
     ])
 
 
-def process_variant(variant_info, rnaseq_bam, genome, max_reads, destpath: str):
+def process_variant(variant_info, rnaseq_bam, genome, max_reads, destpath: str, sname: str):
     """
     Worker function to process a single variant. It's spawned in multiple processes
 
@@ -66,7 +67,7 @@ def process_variant(variant_info, rnaseq_bam, genome, max_reads, destpath: str):
     label = variant_dict.get('label')
     single_tensor = torch.nan_to_num(torch.stack(list(region_tensors.values()), dim=0))
     # store the tensor
-    tensor_filename = f"{variant_id.replace(':', '_').replace('>', '_')}.pt"
+    tensor_filename = f"{sname}_{variant_id.replace(':', '_').replace('>', '_')}.pt"
     torch.save(single_tensor, os.path.join(destpath, tensor_filename) )
     return [tensor_filename, label]
 
@@ -74,17 +75,30 @@ def process_variant(variant_info, rnaseq_bam, genome, max_reads, destpath: str):
 # --- Main Execution Block ---
 if __name__ == '__main__':
     # --- Configuration ---
-    VCF_FILE = "/CTGlab/projects/ribo/goyal_2023/RNAseq/VCF/nSyn/SRR20649710.nSyn.vcf.gz"
-    destpath="/CTGlab/projects/kreios/data/training"
-    sname = "SRR20649710"
-    os.makedirs(os.path.join(
-        destpath, sname
-    ), exist_ok=True)
-    RIBO_BAM = "/CTGlab/projects/ribo/goyal_2023/ribo/SRR20648996.genome.sorted.bam"
-    RNASEQ_BAM = "/CTGlab/projects/ribo/goyal_2023/RNAseq/SRR20649710_GSM6395082.markdup.sorted.bam"
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Process RNA-seq variants and generate tensors.")
+    parser.add_argument("--vcf_file", required=True, help="Path to the VCF file.")
+    parser.add_argument("--destpath", required=True, help="Destination path to store the output tensors.")
+    parser.add_argument("--sname", required=True, help="Sample name for the output directory.")
+    parser.add_argument("--ribo_bam", required=True, help="Path to the Ribo BAM file.")
+    parser.add_argument("--rnaseq_bam", required=True, help="Path to the RNA-seq BAM file.")
+    parser.add_argument("--max_reads", type=int, default=256, help="Maximum number of reads to process.")
+    parser.add_argument("--num_processes", type=int, default=10, help="Number of processes to use.")
+
+    args = parser.parse_args()
+
+    # Assign parsed arguments to variables
+    VCF_FILE = args.vcf_file
+    destpath = args.destpath
+    sname = args.sname
+    RIBO_BAM = args.ribo_bam
+    RNASEQ_BAM = args.rnaseq_bam
+    MAX_READS = args.max_reads
+    NUM_PROCESSES = args.num_processes
+
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.join(destpath, sname), exist_ok=True)
     GENOME = '/CTGlab/db/GRCh38_GIABv3_no_alt_analysis_set_maskedGRC_decoys_MAP2K3_KMT2C_KCNJ18.fasta' 
-    MAX_READS = 256
-    NUM_PROCESSES = 10 # Set the number of CPUs to use
     logging.info("Collecting variants...")
     collected_vars = VariantCollector(VCF_FILE, RIBO_BAM, GENOME)
     
@@ -106,7 +120,8 @@ if __name__ == '__main__':
                                genome=GENOME, 
                                max_reads=MAX_READS,
                                destpath=os.path.join(
-                                destpath, sname))
+                                destpath, sname),
+                                sname=sname)
 
     start_time = time.time()
     
@@ -114,7 +129,7 @@ if __name__ == '__main__':
     with Pool(processes=NUM_PROCESSES) as pool:
         # pool.map distributes the 'tasks' list to the worker function and collects the results.
         results = pool.map(worker_with_args, tasks)
-    metadata_filepath = os.path.join(destpath, sname, "metadata.csv")
+    metadata_filepath = os.path.join(destpath, f"{sname}_metadata.csv")
     with open(metadata_filepath, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['file_path', 'label'])

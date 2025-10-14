@@ -52,7 +52,7 @@ def calculate_metrics(outputs, labels):
 
 if __name__ == '__main__':
     # Training parameters
-    DATASET_DIR = "/CTGlab/projects/kreios/data/training/SRR20649710"
+    DATASET_DIR = "/CTGlab/projects/kreios/data/training/SRR15513228"
     NUM_EPOCHS = 50
     BATCH_SIZE = 32
     LEARNING_RATE = 0.001
