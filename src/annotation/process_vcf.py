@@ -71,7 +71,7 @@ def process_variant(
     ribo_rsbq, ribo_rsbq_pv = calculate_rank_sum_test(alt_bqs, ref_bqs)
 
     # --- Handle INDELs with k-mers ---
-    kmer_entropy, kmer_seq, kmer_ribo_reads = None, None, None
+    kmer_entropy, kmer_seq, kmer_ribo_reads = '.', '.', '.'
     if not var_ext.is_snp:
         indel_var = IndelVariant(
             variant,
@@ -101,7 +101,6 @@ def process_variant(
     variant.INFO["kmer_seq"] = kmer_seq
     variant.INFO["kmer_entropy"] = kmer_entropy
     variant.INFO["kmer_ribo_reads"] = kmer_ribo_reads
-
     return variant
 
 
@@ -170,22 +169,20 @@ def main():
     logging.info("Jellyfish index is ready.")
 
     # \\ Process VCF Records
-    with pysam.AlignmentFile(args.bam, mode="rb") as bam, Writer(
-        args.output, tmpl=vcf_in, mode="wz"
-    ) as out_vcf:
-        logging.info(f"Starting to process variants from {args.vcf}...")
-        for variant in vcf_in:
-            if variant.FILTER is not None and variant.FILTER != "PASS":
-                continue
-
-            var_ext = VariantExtended(variant)
-            annotated_variant = process_variant(
-                variant, var_ext, bam, jellyfish_db, args, out_folder
-            )
-
-            if annotated_variant:
-                out_vcf.write_record(annotated_variant)
-
+    bam = pysam.AlignmentFile(args.bam, mode="rb")
+    out_vcf = Writer(args.output, tmpl=vcf_in, mode="wz")
+    logging.info(f"Starting to process variants from {args.vcf}...")
+    for header in HEADERS:
+        vcf_in.add_info_to_header(header)
+    for variant in vcf_in:
+        if variant.FILTER is not None and variant.FILTER != "PASS":
+            continue
+        var_ext = VariantExtended(variant)
+        annotated_variant = process_variant(
+            variant, var_ext, bam, jellyfish_db, args, out_folder
+        )
+        if annotated_variant:
+            out_vcf.write_record(annotated_variant)
     logging.info(f"Annotation complete. Output written to {args.output}")
 
 
