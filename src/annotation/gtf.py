@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import Optional, Union, Iterable
+import pandas as pd
+from typing import Optional, Union, Iterable, List
 from abc import ABC, abstractmethod
 import logging
 
@@ -65,6 +66,25 @@ class GTF_record(object):
         self.attributes = self._parse_attributes(attributes)
 
     def _parse_attributes(self, attributes) -> dict:
+        """
+        Parses a string of GTF/GFF attribute data into a dictionary.
+
+        Attributes in GTF/GFF files are typically represented as a semicolon-separated
+        list of key-value pairs, where the value is enclosed in double quotes. This
+        method converts such a string into a dictionary for easier access.
+
+        Args:
+            attributes (str or dict): The attribute string to parse, or a dictionary
+                if the attributes are already in dictionary form.
+
+        Returns:
+            dict: A dictionary representation of the attributes, where keys are
+            attribute names and values are their corresponding values.
+
+        Example:
+            Input string: 'gene_id "GENE1"; transcript_id "TRANSCRIPT1";'
+            Output dictionary: {'gene_id': 'GENE1', 'transcript_id': 'TRANSCRIPT1'}
+        """
         if isinstance(attributes, dict):
             return attributes
         attr_dict = {}
@@ -90,6 +110,59 @@ class GTF_record(object):
         """
         return self.attributes.get("gene_type", "") == "protein_coding"
 
+class BedReader(object):
+    def __init__(self, bed):
+        self._bed = bed
+        self._entries = self._populate()
+    
+    def _populate(self):
+        df = pd.read_csv(self._bed, sep='\t', names=['chrom', 'start', 'end', 'strand', 'tid', 'exid'], header=None)
+        # Sort by 'start' and 'end'
+        df = df.sort_values(by=['start', 'end'])
+        # Group by 'chrom' and convert to dictionary of numpy arrays
+        entries = df.groupby('chrom').apply(
+            lambda group: {
+                col: group[col].to_numpy() for col in ['start', 'end', 'strand', 'tid', 'exid']
+            }
+        ).to_dict()
+        return entries
+
+
+    def _get_overlapping(self, chrom: str, pos: int) -> List[tuple]:
+        """
+        Return the overlapping entry of a given pos exploiting numpy.searchsorted.
+        If multiple entries, return all of them.  
+        """
+        try:
+            # Retrieve the data for the specified chromosome
+            chrom_data = self._entries[chrom]
+            starts = chrom_data['start']
+            ends = chrom_data['end']
+            
+            # Find the rightmost interval that could potentially overlap
+            # (intervals where start <= pos)
+            right_idx = starts.searchsorted(pos, side='right')
+            
+            # Collect overlapping entries by checking backwards from right_idx
+            overlapping = []
+            for idx in range(right_idx - 1, -1, -1):
+                # If start > pos, this interval and all previous ones can't overlap
+                if starts[idx] > pos:
+                    break
+                # Check if pos falls within [start, end]
+                if starts[idx] <= pos <= ends[idx]:
+                    overlapping.append(
+                        (starts[idx], ends[idx], chrom_data['strand'][idx], 
+                        chrom_data['tid'][idx], chrom_data['exid'][idx])
+                    )
+                # If end < pos, no earlier intervals can overlap (since sorted by start)
+                elif ends[idx] < pos:
+                    break
+                    
+            return overlapping
+        except KeyError:
+            logging.warning(f"Chromosome {chrom} not found in entries.")
+            return []
 
 class Collector(ABC):
     """
@@ -190,7 +263,6 @@ class TranscriptCollector(Collector):
             else:
                 return (None,) * positions
 
-
 class ExonCollector(Collector):
     """Collector for exon features from a GTF file."""
     
@@ -221,9 +293,7 @@ class CDSCollector(Collector):
     
     def _process_entry(self, entry: GTF_record, features):
         exon_id = entry.attributes.get('exon_id')
-        # CDS entries might use 'protein_id' or just index by position
-        cds_id = entry.attributes.get('exon_id', f"{entry.start}_{entry.end}")
-        features[exon_id][cds_id] = (
+        features[exon_id] = (
             int(entry.start), int(entry.end), entry.strand
         )
     
@@ -244,7 +314,7 @@ class CDSCollector(Collector):
             Reading frame(s) (0, 1, 2) or None if exon not found.
         """
         try:
-            cds_start, _ = self._features[exon_id]
+            cds_start, _, _ = self._features[exon_id]
             if isinstance(pos, int):
                 return (pos - cds_start) % 3
             else:
