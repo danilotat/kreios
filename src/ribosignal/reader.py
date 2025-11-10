@@ -5,7 +5,7 @@ import logging
 class PredictionsReader(object):
     def __init__(self, predictions: str):
         self._prediction_file = predictions
-        self._predictions = self._read_predictions()
+        self._entries = self._read_predictions()
     
     def _read_predictions(self):
         predictions = pd.read_csv(self._prediction_file, sep='\t')
@@ -14,6 +14,8 @@ class PredictionsReader(object):
         # unpack into a more convenient item that could be queried
         predictions[["TisChrom", "TisPos", "TisStrand"]] = predictions["GenomePos"].str.split(':', n=2, expand=True)
         predictions[["TisStart", "TisEnd"]] = predictions["TisPos"].str.split("-", n=1, expand=True)
+        predictions["TisStart"] = predictions["TisStart"].astype(int)
+        predictions["TisEnd"] = predictions["TisEnd"].astype(int)
         predictions = predictions.sort_values(by=['TisStart', 'TisEnd'])
         entries = predictions.groupby('TisChrom').apply(
             lambda group: {
@@ -43,12 +45,11 @@ class PredictionsReader(object):
                 if starts[idx] <= pos <= ends[idx]:
                     overlapping.append(
                         (starts[idx], ends[idx], chrom_data['TisStrand'][idx], 
-                        chrom_data['tid'][idx])
+                        chrom_data['Tid'][idx])
                     )
                 # If end < pos, no earlier intervals can overlap (since sorted by start)
                 elif ends[idx] < pos:
-                    break
-                    
+                    break    
             return overlapping
         except KeyError:
             logging.warning(f"Chromosome {chrom} not found in entries.")
