@@ -1,6 +1,72 @@
 import pandas as pd
+import ast
 from typing import List
 import logging
+from collections import namedtuple
+import itertools
+import pysam
+# NOTE: this dependencty should be avoided at all, as it's used just for reverse complement
+from Bio.Seq import Seq
+
+
+# The CodonTable is used to assign an index to each codon.
+# All the stop codons will share the same index. 
+bases = ['A', 'C', 'G', 'T']
+stop_codons = ['TAA', 'TAG', 'TGA']
+codons = [''.join(p) for p in itertools.product(bases, repeat=3) if ''.join(p) not in stop_codons]
+codon_dict = {k:v for k,v in zip(codons + stop_codons, [i for i in range(1,61)] + [61]*3)}
+CodonTable = namedtuple('CodonTable', codon_dict.keys())(**codon_dict)
+
+
+
+class RibotishReader(object):
+    """
+    Class for handling predictions and profiles all together. 
+    """
+    def __init__(self, predictions: str, profile: str, genome: str):
+        self._predictions = predictions # ORFs
+        self._profile = profile 
+        self._genome = pysam.FastaFile(genome)
+        self.predictions = self._read_predictions()
+
+    @staticmethod
+    def _get_codons(chrom: str, start: int, end: int, strand: str,  genome: pysam.FastaFile):
+        seq = genome.fetch(
+            chrom, start, end
+        )
+        if strand == "-":
+            seq = Seq(seq).reverse_complement()
+        # fragment in codons. 
+        codons = [seq[i:i+3] for i in range(0, len(seq), 3)]
+        # return indexes, but with the same length of the input range. 
+        codons = [getattr(CodonTable, codon)*3 for codon in codons]
+        return codons
+
+    def _read_predictions(self):
+        predictions = pd.read_csv(self._predictions, sep='\t')
+        profile = pd.read_csv(self._profile, sep='\t', converters={
+            'TisProf': ast.literal_eval,
+            'RiboProf': ast.literal_eval,
+        }) # P profiles, that has coordinates relative to annotated TIS. 
+        predictions['TisStart'] = predictions['GenomePos'].apply(lambda j: int(j.split(':')[1].split('-')[0]))
+        predictions['profile'] = predictions['Tid'].map(profile.set_index("Tid")['RiboProf'])                
+        # profile is a dict, but it has no entry for 0 positions. Relativize also the coordinates to be 1-based on the transcript
+        predictions['profile'] = predictions.apply(lambda row: {(i-row['Start'])+1:row['profile'].get(i, 0) for i in range(row['Start'], row['Stop']+1)}, axis=1)
+        predictions[["chrom", "range", "strand"]] = predictions["GenomePos"].str.split(":", n=2, expand=True)
+        predictions[["start", "end"]] = predictions["range"].str.split("-", n=1, expand=True)
+        predictions["start"] = predictions["start"].astype(int)
+        predictions["end"] = predictions["end"].astype(int)
+        # fetch the sequences in a codon based fashion.
+        predictions["codons"] = predictions.apply(lambda row: self._get_codons(
+            row["chrom"], row["start"], row["end"], row["strand"], self._genome), axis=1)
+        # frame is easy, as the first position is always the start codon, thus the frame is 0. 
+        # The returned array has [0,1,2,.., 0,1,2], matching the length of the ORF
+        predictions["frame"] =  predictions["codons"].apply(
+            lambda codons: list(range(3)) * (len(codons) // 3) + list(range(len(codons) % 3))
+        )
+        return predictions
+
+
 
 class PredictionsReader(object):
     def __init__(self, predictions: str):
@@ -128,3 +194,8 @@ class RibotishReader(object):
                     tis_profiles[tid] = TisProf
                     ribo_profiles[tid] = RiboProf
         return tis_profiles, ribo_profiles
+    
+
+class RibotishReaderWithCodons(RibotishReader):
+    def __init__(self, tc):
+        super(RibotishReader).__init__()
