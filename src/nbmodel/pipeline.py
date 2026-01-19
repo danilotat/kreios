@@ -3,8 +3,10 @@ from typing import Iterator, Optional
 from dataclasses import dataclass
 from collections import defaultdict
 import numpy as np
+import pandas as pd
 import h5py
-from reader import RibotishReader, RibotishORFReader, ORFRecord
+from scipy.stats import chi2_contingency
+from reader import RibotishReader
 from gtf import TranscriptCollector
 from vcf import VariantCollector, VariantObj
 
@@ -25,7 +27,6 @@ class DatasetBuilder:
         variant_collector: VariantCollector,
         transcript_collector: TranscriptCollector,
         ribotish_reader: RibotishReader,
-        orf_reader: RibotishORFReader,
         consequence: str = 'frameshift',
     ):
         """
@@ -35,13 +36,11 @@ class DatasetBuilder:
             variant_collector: VariantCollector with variants indexed by transcript
             transcript_collector: TranscriptCollector with transcript boundaries
             ribotish_reader: RibotishReader with ribosome profiles
-            orf_reader: RibotishORFReader with ORF predictions
             consequence: Variant consequence type to filter for (default: 'frameshift')
         """
         self.variants = variant_collector
         self.transcripts = transcript_collector
         self.profiles = ribotish_reader
-        self.orfs = orf_reader
         self.consequence = consequence
         self.profiles = self._build_dataframe()
 
@@ -191,13 +190,84 @@ class DatasetBuilder:
 
         return profiles
 
+    @staticmethod
+    def _sum_by_frame(profile: np.ndarray) -> tuple[int, int, int]:
+        """Sum counts by reading frame (0, 1, 2)."""
+        frame_sums = [0, 0, 0]
+        for i, count in enumerate(profile):
+            frame_sums[i % 3] += int(count)
+        return tuple(frame_sums)
+
+    @staticmethod
+    def _chi2_test_3x2(pre_profile: np.ndarray, after_profile: np.ndarray) -> dict:
+        """
+        Compute chi-square test on 3x2 contingency table (3 frames × pre/after).
+
+        Returns:
+            Dict with chi2 statistic, p-value, and degrees of freedom
+        """
+        pre_frames = DatasetBuilder._sum_by_frame(pre_profile)
+        after_frames = DatasetBuilder._sum_by_frame(after_profile)
+
+        # 3x2 contingency table: rows = frames, cols = pre/after
+        table = np.array([
+            [pre_frames[0], after_frames[0]],
+            [pre_frames[1], after_frames[1]],
+            [pre_frames[2], after_frames[2]],
+        ])
+
+        chi2, p_value, dof, _ = chi2_contingency(table)
+        return {'chi2': chi2, 'p_value': p_value, 'dof': dof}
+
+    def to_pandas(self, with_chi2: bool = True) -> pd.DataFrame:
+        """
+        Export dataset to a pandas DataFrame with summed counts per frame.
+
+        Args:
+            with_chi2: If True, include chi-square test p-value
+
+        Returns:
+            DataFrame with columns: tid, variant_id, variant_pos, strand,
+            pre_frame_0/1/2, after_frame_0/1/2, and optionally chi2_pvalue
+        """
+        rows = []
+        for tid, entries in self.profiles.items():
+            for entry in entries:
+                pre_frames = self._sum_by_frame(entry['pre_profile'])
+                after_frames = self._sum_by_frame(entry['after_profile'])
+
+                row = {
+                    'tid': tid,
+                    'variant_id': entry['variant_id'],
+                    'variant_pos': entry['variant_pos'],
+                    'variant_rel_pos': entry['variant_rel_pos'],
+                    'strand': entry['strand'],
+                    'pre_frame_0': pre_frames[0],
+                    'pre_frame_1': pre_frames[1],
+                    'pre_frame_2': pre_frames[2],
+                    'after_frame_0': after_frames[0],
+                    'after_frame_1': after_frames[1],
+                    'after_frame_2': after_frames[2],
+                }
+
+                if with_chi2:
+                    chi2_result = self._chi2_test_3x2(
+                        entry['pre_profile'], entry['after_profile']
+                    )
+                    row['chi2_pvalue'] = chi2_result['p_value']
+                    row['chi2_statistic'] = chi2_result['chi2']
+
+                rows.append(row)
+
+        return pd.DataFrame(rows)
+
 
 
 
 if __name__ == '__main__':
     from gtf import TranscriptCollector
     from vcf import VariantCollector
-    from reader import RibotishReader, RibotishORFReader
+    from reader import RibotishReader
 
     # Example usage
     tc = TranscriptCollector(
@@ -210,26 +280,16 @@ if __name__ == '__main__':
         "/Users/danilo/Research/Tools/kreios/examples/ribotish/"
         "SRR15513184_GSM5527709_Fibroblast_40_RiboSeq_Homo_sapiens_RNA-Seq_transprofile.py"
     )
-    orfs = RibotishORFReader(
-        "/Users/danilo/Research/Tools/kreios/examples/ribotish/"
-        "SRR15513184_GSM5527709_Fibroblast_40_RiboSeq_Homo_sapiens_RNA-Seq_pred.txt"
-    )
-
 
     builder = DatasetBuilder(
         variant_collector=vc,
         transcript_collector=tc,
         ribotish_reader=rr,
-        orf_reader=orfs,
-        consequence='frameshift',  # default, can be changed to other consequences
+        consequence='frameshift',
     )
     print(builder)
-    for tid, profiles in builder.profiles.items():
-        for i in profiles:
-            pre_sum = i['pre_profile'].sum()
-            after_sum = i['after_profile'].sum()
-            features = i.get('features', [])
-            print(f'Tid: {tid}\tpre: {pre_sum}\tafter: {after_sum}\tfeatures: {features}')
 
-    print(builder.profiles.get('ENST00000381605'))
-    
+    # Export to pandas with chi-square test
+    df = builder.to_pandas()
+    print(df)
+
