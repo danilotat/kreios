@@ -22,7 +22,11 @@ class RegionCollector:
     def _store_regions(self, vc: VariantCollector) -> dict:
         collector = {}
         for variant in vc:
-            if variant.is_snp:
+            if all((
+                variant.is_snp,
+                'missense' in variant.consequence,
+                variant.filtered)
+                ):
                 cov = CoverageHandler(self._bam_file.count_coverage(
                     variant.chrom, variant.pos, variant.pos + 1,
                     read_callback="all"
