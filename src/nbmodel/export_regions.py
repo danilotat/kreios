@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import pandas as pd
-from .vcf import VariantCollector
-from .alignment import RegionCollector
+from vcf import VariantCollector
+from alignment import RegionCollector
 
 
 def main():

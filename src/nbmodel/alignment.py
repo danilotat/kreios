@@ -1,5 +1,5 @@
 import pysam 
-from .vcf import VariantCollector
+from vcf import VariantCollector
 import numpy as np
 import scipy.stats as stats
 
