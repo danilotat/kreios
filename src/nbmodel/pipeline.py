@@ -204,7 +204,8 @@ class DatasetBuilder:
         Compute chi-square test on 3x2 contingency table (3 frames × pre/after).
 
         Returns:
-            Dict with chi2 statistic, p-value, and degrees of freedom
+            Dict with chi2 statistic, p-value, and degrees of freedom.
+            Returns NaN values if test cannot be computed (e.g., zero counts).
         """
         pre_frames = DatasetBuilder._sum_by_frame(pre_profile)
         after_frames = DatasetBuilder._sum_by_frame(after_profile)
@@ -216,8 +217,15 @@ class DatasetBuilder:
             [pre_frames[2], after_frames[2]],
         ])
 
-        chi2, p_value, dof, _ = chi2_contingency(table)
-        return {'chi2': chi2, 'p_value': p_value, 'dof': dof}
+        # Check for zero row/column sums which cause chi2_contingency to fail
+        if table.sum() == 0 or (table.sum(axis=0) == 0).any() or (table.sum(axis=1) == 0).any():
+            return {'chi2': np.nan, 'p_value': np.nan, 'dof': np.nan}
+
+        try:
+            chi2, p_value, dof, _ = chi2_contingency(table)
+            return {'chi2': chi2, 'p_value': p_value, 'dof': dof}
+        except ValueError:
+            return {'chi2': np.nan, 'p_value': np.nan, 'dof': np.nan}
 
     def to_pandas(self, with_chi2: bool = True) -> pd.DataFrame:
         """
