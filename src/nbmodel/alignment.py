@@ -25,7 +25,7 @@ class RegionCollector:
             if variant.is_snp:
                 cov = CoverageHandler(self._bam_file.count_coverage(
                     variant.chrom, variant.pos, variant.pos + 1,
-                    read_callback="BAM_FQCFAIL"
+                    read_callback="all"
                 ))
                 binom_p = stats.binomtest(
                     cov.get(variant.alt),
