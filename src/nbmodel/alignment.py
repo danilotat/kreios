@@ -6,7 +6,7 @@ import scipy.stats as stats
 class CoverageHandler:
     def __init__(self, coverage: np.ndarray):
         self.cov = dict(zip(['A','C','G','T'], [c[0] if c[0] else 0 for c in coverage]))
-        self.dp = np.sum(coverage)
+        self.dp = int(np.sum(coverage))
     
     def get(self, n: str):
         try:
@@ -27,10 +27,8 @@ class RegionCollector:
                     variant.chrom, variant.pos, variant.pos + 1,
                     read_callback="all"
                 ))
-                # binom test does not handle 0 for k
-                if cov.get(variant.alt) > 0:
-                    binom_p = None
-                else:
+                # binom test requires n >= 1 and valid k
+                if cov.dp >= 1 and cov.get(variant.alt) >= 0:
                     binom_p = stats.binomtest(
                         cov.get(variant.alt),
                         cov.dp,
@@ -38,6 +36,8 @@ class RegionCollector:
                             variant.alt_dp / variant.dp, 3
                         )
                     ).pvalue
+                else:
+                    binom_p = None
                 collector[variant.variant_id] = {
                     'tid': variant.tid,
                     'dp_RNA': variant.dp,
