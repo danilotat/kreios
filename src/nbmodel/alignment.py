@@ -5,7 +5,7 @@ import scipy.stats as stats
 
 class CoverageHandler:
     def __init__(self, coverage: np.ndarray):
-        self.cov = dict(zip(['A','C','G','T'], coverage))
+        self.cov = dict(zip(['A','C','G','T'], [c[0] for c in coverage]))
         self.dp = np.sum(coverage)
     
     def get(self, n: str):
