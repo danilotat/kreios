@@ -27,13 +27,17 @@ class RegionCollector:
                     variant.chrom, variant.pos, variant.pos + 1,
                     read_callback="all"
                 ))
-                binom_p = stats.binomtest(
-                    cov.get(variant.alt),
-                    cov.dp,
-                    p=np.round(
-                        variant.alt_dp / variant.dp, 3
-                    )
-                ).pvalue
+                # binom test does not handle 0 for k
+                if cov.get(variant.alt) > 0:
+                    binom_p = None
+                else:
+                    binom_p = stats.binomtest(
+                        cov.get(variant.alt),
+                        cov.dp,
+                        p=np.round(
+                            variant.alt_dp / variant.dp, 3
+                        )
+                    ).pvalue
                 collector[variant.variant_id] = {
                     'tid': variant.tid,
                     'dp_RNA': variant.dp,
