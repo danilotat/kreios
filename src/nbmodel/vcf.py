@@ -19,7 +19,7 @@ class VariantObj:
     def __init__(self, variant: cyvcf2.Variant, csq: dict):
         self._variant = variant
         self.chrom = variant.CHROM
-        self.pos = variant.POS
+        self.pos = variant.POS - 1 #0-based for pysam compatibility 
         self.ref = variant.REF
         self.alt = variant.ALT[0]
         self.tid = csq.get('Feature', None)
