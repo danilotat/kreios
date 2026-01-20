@@ -59,7 +59,9 @@ def main():
 
     print(f"Reading variants from {args.csv}...")
     df = pd.read_csv(args.csv)
-
+    
+    # infer sname 
+    sname = os.path.basename(args.csv).split('.')[0]
     # Validate required columns
     required_cols = ['tid', 'variant_id', 'variant_rel_pos']
     missing = set(required_cols) - set(df.columns)
@@ -107,7 +109,7 @@ def main():
 
         # Save plot
         safe_name = sanitize_filename(variant_id)
-        outpath = os.path.join(args.outdir, f"{safe_name}.pdf")
+        outpath = os.path.join(args.outdir, f"{sname}_{safe_name}.pdf")
         fig.savefig(outpath, bbox_inches='tight', dpi=350, transparent=True)
         plt.close(fig)
 
