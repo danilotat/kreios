@@ -2,7 +2,7 @@
 import argparse
 from vcf import VariantCollector
 from gtf import TranscriptCollector
-from reader import RibotishReader
+from reader import RibotishReader, RiboWaltzReader
 from pipeline import DatasetBuilder
 
 
@@ -12,8 +12,14 @@ def main():
     )
     parser.add_argument("--vcf", required=True, help="Input VCF file with VEP annotations")
     parser.add_argument("--gtf", required=True, help="GTF annotation file")
-    parser.add_argument("--ribotish", required=True, help="Ribotish transprofile file")
+    parser.add_argument("--profile", required=True, help="Ribosome profile file (ribotish transprofile or riboWaltz psite)")
     parser.add_argument("--outfile", required=True, help="Output CSV file")
+    parser.add_argument(
+        "--reader-type",
+        choices=["ribotish", "ribowaltz"],
+        default="ribotish",
+        help="Reader type for profile file (default: ribotish)",
+    )
     parser.add_argument(
         "--consequence",
         default="frameshift",
@@ -28,12 +34,16 @@ def main():
 
     vc = VariantCollector(args.vcf)
     tc = TranscriptCollector(args.gtf)
-    rr = RibotishReader(args.ribotish)
+
+    if args.reader_type == "ribotish":
+        reader = RibotishReader(args.profile)
+    else:
+        reader = RiboWaltzReader(args.profile)
 
     builder = DatasetBuilder(
         variant_collector=vc,
         transcript_collector=tc,
-        ribotish_reader=rr,
+        ribotish_reader=reader,
         consequence=args.consequence,
     )
 
