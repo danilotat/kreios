@@ -93,7 +93,7 @@ def main():
 
         # Create plot
         fig, ax = plt.subplots(figsize=(10, 4))
-        plot_frameshift_signal(
+        axs = plot_frameshift_signal(
             pre_profile=pre_profile,
             after_profile=after_profile,
             variant_rel_pos=variant_rel_pos,
@@ -102,7 +102,8 @@ def main():
             title=f"{tid} - {variant_id}",
             show_frames=True,
         )
-        ax.set_xlim(max(variant_rel_pos-200,0), variant_rel_pos+200)
+        axs[0].set_xlim(max(variant_rel_pos-200,0), variant_rel_pos+200)
+        axs[1].set_xlim(max(variant_rel_pos-200,0), variant_rel_pos+200)
         # Save plot
         safe_name = sanitize_filename(variant_id)
         outpath = os.path.join(args.outdir, f"{sname}_{safe_name}.pdf")
