@@ -28,27 +28,8 @@ fontPath = '../../font/HelveticaNeue-Medium.otf'
 font_prop = fm.FontProperties(fname=fontPath)
 fm.fontManager.addfont(fontPath)
 # Set the default font size
-mpl.rcParams['font.size'] = 14
 mpl.rcParams['font.family'] = font_prop.get_name()
 mpl.rcParams['font.sans-serif'] = font_prop.get_name()
-# Set the font size for labels and titles
-mpl.rcParams['axes.labelsize'] = 12
-mpl.rcParams['axes.titlesize'] = 16
-mpl.rcParams['xtick.major.width'] = 1.5
-mpl.rcParams['ytick.major.width'] = 1.5
-mpl.rcParams['legend.fontsize'] = 12
-mpl.rcParams['legend.title_fontsize'] = 12
-mpl.rcParams['xtick.labelsize'] = 12
-mpl.rcParams['ytick.labelsize'] = 12
-# Set the black spines with width 1.5
-mpl.rcParams['axes.spines.right'] = True
-mpl.rcParams['axes.spines.top'] = True
-mpl.rcParams['axes.edgecolor'] = 'black'
-mpl.rcParams['axes.linewidth'] = 1.5
-mpl.rcParams['lines.linewidth'] = 1.5
-# Set normal ticks on axis
-mpl.rcParams['xtick.direction'] = 'out'
-mpl.rcParams['ytick.direction'] = 'out'
 
 def plot_riboseq_profile(
     triplet_counts, 
