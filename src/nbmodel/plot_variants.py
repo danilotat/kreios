@@ -41,10 +41,6 @@ def main():
         "--outdir", default=".",
         help="Output directory for plots (default: current directory)"
     )
-    parser.add_argument(
-        "--show-frames", action="store_true",
-        help="Color bars by reading frame"
-    )
     args = parser.parse_args()
 
     # Create output directory if it doesn't exist
@@ -104,9 +100,9 @@ def main():
             features=features,
             ax=ax,
             title=f"{tid} - {variant_id}",
-            show_frames=args.show_frames,
+            show_frames=True,
         )
-
+        ax.set_xlim(max(variant_rel_pos-200,0), variant_rel_pos+200)
         # Save plot
         safe_name = sanitize_filename(variant_id)
         outpath = os.path.join(args.outdir, f"{sname}_{safe_name}.pdf")
