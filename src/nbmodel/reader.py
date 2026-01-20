@@ -82,44 +82,48 @@ class RiboWaltzReader:
     
     def _load_and_aggregate(self, keep_raw: bool) -> None:
         """Load psite file and aggregate to position-level counts."""
-        # Read full file
-        df = pd.read_csv(self._file, sep='\t', compression='gzip')
-        
+        # Only read required columns for efficiency
+        usecols = ['transcript', 'psite']
+        if keep_raw:
+            usecols = None  # Read all columns if keeping raw data
+
+        df = pd.read_csv(
+            self._file,
+            sep='\t',
+            compression='gzip',
+            usecols=usecols,
+            dtype={'transcript': 'category', 'psite': 'int32'} if not keep_raw else None
+        )
+
         # Validate required columns
         missing = set(self._REQUIRED_COLS) - set(df.columns)
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
-        
+
         self._n_reads = len(df)
-        
-        # Extract sample name if available
-        if 'sample' in df.columns and len(df) > 0:
+
+        # Extract sample name if available (requires re-reading header for sample column)
+        if keep_raw and 'sample' in df.columns and len(df) > 0:
             self._sample_name = df['sample'].iloc[0]
-        
+
         # Strip version from transcript IDs
         if self._strip_version:
-            df['transcript'] = df['transcript'].str.split('.').str[0]
-        
+            df['transcript'] = df['transcript'].astype(str).str.split('.').str[0]
+
         # Store raw data if requested
         if keep_raw:
             self._raw_frame = df.copy()
-        
-        # Aggregate to position-level counts
-        # Group by transcript and psite, count occurrences
-        self._aggregated = (
-            df.groupby(['transcript', 'psite'])
-            .size()
-            .reset_index(name='count')
-        )
-        
-        # Build index for fast transcript lookup
-        # Store as dict: tid -> DataFrame slice
+
+        # Aggregate to position-level counts using value_counts (faster than groupby.size)
+        counts = df.groupby(['transcript', 'psite'], observed=True).size()
+
+        # Build index for fast transcript lookup using vectorized operations
         self._by_transcript: dict[str, pd.DataFrame] = {}
-        for tid, group in self._aggregated.groupby('transcript'):
-            # Convert to numpy for faster access
+        for tid in counts.index.get_level_values('transcript').unique():
+            tid_data = counts.loc[tid]
             self._by_transcript[tid] = {
-                'positions': group['psite'].values,
-                'counts': group['count'].values
+                'positions': tid_data.index.values.astype(np.int64),
+                'counts': tid_data.values.astype(np.int64)
             }
     
     @staticmethod
