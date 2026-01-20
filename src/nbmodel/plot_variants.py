@@ -108,7 +108,7 @@ def main():
         # Save plot
         safe_name = sanitize_filename(variant_id)
         outpath = os.path.join(args.outdir, f"{safe_name}.pdf")
-        fig.savefig(outpath, bbox_inches='tight', dpi=350, transparent=True, bbox_inches='tight')
+        fig.savefig(outpath, bbox_inches='tight', dpi=350, transparent=True)
         plt.close(fig)
 
         print(f"  [{idx + 1}/{len(df)}] Saved {outpath}")
