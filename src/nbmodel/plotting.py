@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -10,7 +11,7 @@ import seaborn as sns
 nature_palette = {
     "Shakespeare": "#4DBBD5",
     "Cinnabar" :"#E64B35",
-    "PersianGreen" :"#00A087", 
+    "PersianGreen" :"#00A087",
     "Chambray" : "#3C5488",
     "Apricot" : "#F39B7F",
     "WildBlueYonder": "#8491B4",
@@ -23,8 +24,9 @@ nature_palette = {
 # Set the seaborn whitegrid theme
 # sns.set_theme(style="ticks")
 sns.set_palette(nature_palette.values())
-# Set the default font
-fontPath = '../../font/HelveticaNeue-Medium.otf'
+# Set the default font (relative to this module's location)
+_MODULE_DIR = Path(__file__).resolve().parent
+fontPath = _MODULE_DIR / '../../font/HelveticaNeue-Medium.otf'
 font_prop = fm.FontProperties(fname=fontPath)
 fm.fontManager.addfont(fontPath)
 # Set the default font size
