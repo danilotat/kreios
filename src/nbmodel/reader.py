@@ -84,11 +84,11 @@ class RiboWaltzReader:
         """Load psite file and aggregate to position-level counts."""
         # Determine which columns exist in file
         # Read header first to check available columns
-        with pd.read_csv(self._file, sep='\t', nrows=0) as _:
+        with pd.read_csv(self._file, sep='\t', nrows=0, compression='gzip') as _:
             pass  # Just to check file exists
         
         # Read full file
-        df = pd.read_csv(self._file, sep='\t')
+        df = pd.read_csv(self._file, sep='\t', compression='gzip')
         
         # Validate required columns
         missing = set(self._REQUIRED_COLS) - set(df.columns)
