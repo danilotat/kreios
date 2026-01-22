@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional, Union, TYPE_CHECKING
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -7,6 +8,11 @@ from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 import matplotlib.font_manager as fm
 import seaborn as sns
+
+if TYPE_CHECKING:
+    from alignment import VariantCDSCoverage
+    from reader import RibotishReader
+    from gtf import TranscriptCollector
 
 nature_palette = {
     "Shakespeare": "#4DBBD5",
@@ -321,3 +327,148 @@ def plot_frameshift_signal(
     if ax_features is not None:
         return ax_features, ax_signal
     return ax_signal
+
+
+def plot_rna_ribo_coverage(
+    variant_id: str,
+    cds_coverage: 'VariantCDSCoverage',
+    ribotish_reader: 'RibotishReader',
+    transcript_collector: 'TranscriptCollector',
+    show_frames: bool = False,
+    figsize: tuple = (12, 8),
+    title: Optional[str] = None,
+) -> tuple:
+    """
+    Plot RNA and Ribo-seq coverage for a variant on stacked subplots.
+
+    Both profiles are shown on the same CDS coordinate system, from the
+    variant position to the CDS end.
+
+    Parameters
+    ----------
+    variant_id : str
+        Variant ID in format "chr:pos:ref>alt".
+    cds_coverage : VariantCDSCoverage
+        Instance containing RNA coverage data for variants.
+    ribotish_reader : RibotishReader
+        Instance for reading ribosome profiling data.
+    transcript_collector : TranscriptCollector
+        Instance for transcript/CDS coordinate lookup.
+    show_frames : bool, optional
+        If True, display Ribo-seq signal colored by reading frame.
+        Default is False.
+    figsize : tuple, optional
+        Figure size (width, height). Default is (12, 8).
+    title : str, optional
+        Title for the figure. If None, uses variant_id.
+
+    Returns
+    -------
+    tuple : (fig, (ax_rna, ax_ribo))
+        Figure and axes objects.
+    """
+    # Get variant data from VariantCDSCoverage
+    variant_data = cds_coverage.get(variant_id)
+    if variant_data is None:
+        raise ValueError(f"Variant {variant_id} not found in VariantCDSCoverage")
+
+    tid = variant_data['tid']
+    strand = variant_data['strand']
+    cds_start = variant_data['cds_start']
+    cds_end = variant_data['cds_end']
+    variant_pos = variant_data['variant_pos']
+    variant_cds_pos = variant_data['variant_cds_pos']
+    rna_coverage = variant_data['coverage']
+
+    # Calculate the genomic region for Ribo-seq query
+    if strand == '+':
+        ribo_start = variant_pos
+        ribo_end = cds_end
+    else:
+        ribo_start = cds_start
+        ribo_end = variant_pos + 1
+
+    # Get Ribo-seq profile for the same region (transcript-relative coords)
+    tx_start, tx_end, _ = transcript_collector[tid]
+    if tx_start is None:
+        raise ValueError(f"Transcript {tid} not found in TranscriptCollector")
+
+    # Convert genomic to transcript-relative coordinates
+    if strand == '+':
+        tx_ribo_start = ribo_start - tx_start
+        tx_ribo_end = ribo_end - tx_start
+    else:
+        tx_ribo_start = tx_end - ribo_end
+        tx_ribo_end = tx_end - ribo_start
+
+    # Get Ribo profile from ribotish reader
+    ribo_positions, ribo_profile = ribotish_reader._get_profile(tid, tx_ribo_start, tx_ribo_end - 1)
+
+    # Flip for reverse strand to match RNA coverage orientation
+    if strand == '-':
+        ribo_profile = ribo_profile[::-1]
+
+    # Create CDS-relative x-axis (from variant to CDS end)
+    cds_length = cds_end - cds_start
+    if strand == '+':
+        # x-axis: variant_cds_pos to cds_length
+        x_coords = np.arange(variant_cds_pos, variant_cds_pos + len(rna_coverage))
+    else:
+        # x-axis: 0 to variant_cds_pos (from 5' end of CDS)
+        x_coords = np.arange(len(rna_coverage))
+
+    # Create figure with stacked subplots
+    fig, (ax_rna, ax_ribo) = plt.subplots(
+        2, 1, figsize=figsize, sharex=True,
+        gridspec_kw={'height_ratios': [1, 1], 'hspace': 0.1}
+    )
+
+    # --- RNA Coverage Plot ---
+    ax_rna.fill_between(x_coords, rna_coverage, alpha=0.7, color=nature_palette['Shakespeare'])
+    ax_rna.plot(x_coords, rna_coverage, color=nature_palette['Chambray'], lw=0.5)
+    ax_rna.axvline(variant_cds_pos, color='red', linestyle='--', lw=1.5, label='Variant')
+    ax_rna.set_ylabel("RNA Coverage")
+    ax_rna.spines['top'].set_visible(False)
+    ax_rna.spines['right'].set_visible(False)
+    ax_rna.legend(loc='upper right', fontsize=8, frameon=False)
+
+    # --- Ribo-seq Coverage Plot ---
+    # Align ribo profile to CDS coordinates
+    ribo_x = np.arange(len(ribo_profile))
+    if strand == '+':
+        ribo_x = ribo_x + variant_cds_pos
+    # For reverse strand, ribo_x starts at 0 which matches our coordinate system
+
+    if show_frames:
+        # Color by reading frame
+        frame_colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
+
+        # Calculate frame relative to CDS start
+        if strand == '+':
+            frame_offset = variant_cds_pos % 3
+        else:
+            frame_offset = 0
+
+        bar_colors = [frame_colors[(i + frame_offset) % 3] for i in range(len(ribo_profile))]
+        ax_ribo.bar(ribo_x, ribo_profile, width=1, color=bar_colors, edgecolor='none', alpha=0.8)
+
+        # Add frame legend
+        handles = [Patch(facecolor=c, label=f'Frame {i}') for i, c in enumerate(frame_colors)]
+        handles.append(Line2D([0], [0], color='red', linestyle='--', lw=1.5, label='Variant'))
+        ax_ribo.legend(handles=handles, loc='upper right', fontsize=8, frameon=False)
+    else:
+        ax_ribo.bar(ribo_x, ribo_profile, width=1, color=nature_palette['PersianGreen'],
+                   edgecolor='none', alpha=0.8)
+        ax_ribo.axvline(variant_cds_pos, color='red', linestyle='--', lw=1.5)
+
+    ax_ribo.set_ylabel("Ribo-seq Signal")
+    ax_ribo.set_xlabel("CDS Position (nt)")
+    ax_ribo.spines['top'].set_visible(False)
+    ax_ribo.spines['right'].set_visible(False)
+
+    # Set title
+    plot_title = title if title else f"{variant_id} ({tid})"
+    ax_rna.set_title(plot_title)
+
+    plt.tight_layout()
+    return fig, (ax_rna, ax_ribo)
